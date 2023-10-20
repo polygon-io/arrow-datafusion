@@ -29,7 +29,9 @@ use crate::physical_plan::SendableRecordBatchStream;
 
 use arrow_array::builder::UInt64Builder;
 use arrow_array::cast::AsArray;
-use arrow_array::{RecordBatch, StructArray};
+use arrow_array::{
+    downcast_dictionary_array, ArrayAccessor, RecordBatch, StringArray, StructArray,
+};
 use arrow_schema::{DataType, Schema};
 use datafusion_common::cast::as_string_array;
 use datafusion_common::DataFusionError;
@@ -310,6 +312,19 @@ fn compute_partition_keys_by_row<'a>(
                 for i in 0..rb.num_rows() {
                     partition_values.push(array.value(i));
                 }
+            }
+            DataType::Dictionary(_, value_type)
+                if value_type.as_ref() == &DataType::Utf8 =>
+            {
+                downcast_dictionary_array!(
+                    col_array =>  {
+                        let array = col_array.downcast_dict::<StringArray>().unwrap();
+                        for i in 0..rb.num_rows() {
+                            partition_values.push(array.value(i));
+                        }
+                    },
+                    _ => unreachable!(),
+                )
             }
             _ => {
                 return Err(DataFusionError::NotImplemented(format!(
