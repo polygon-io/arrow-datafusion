@@ -42,7 +42,7 @@ use datafusion_execution::TaskContext;
 use datafusion_expr::Operator;
 use datafusion_physical_expr::expressions::BinaryExpr;
 use datafusion_physical_expr::intervals::utils::check_support;
-use datafusion_physical_expr::utils::{collect_columns, LiteralGuarantee};
+use datafusion_physical_expr::utils::{collect_columns, Guarantee, LiteralGuarantee};
 use datafusion_physical_expr::{
     analyze, split_conjunction, AnalysisContext, ExprBoundaries, PhysicalExpr,
 };
@@ -125,13 +125,30 @@ impl FilterExec {
         let schema = input.schema();
 
         let input_stats = input.statistics().map(|mut input_stats| {
-            for guarantee in LiteralGuarantee::analyze(predicate) {
+            for guarantee in LiteralGuarantee::analyze(predicate)
+                .into_iter()
+                .filter(|g| g.guarantee == Guarantee::In)
+            {
                 let idx = match schema.index_of(&guarantee.column.name) {
                     Ok(idx) => idx,
                     Err(_) => continue,
                 };
 
-                input_stats.column_statistics[idx] = guarantee.statistics();
+                let column_stats = &mut input_stats.column_statistics[idx];
+                let new_stats = guarantee.statistics();
+
+                column_stats.distinct_count =
+                    column_stats.distinct_count.min(&new_stats.distinct_count);
+                column_stats.null_count =
+                    column_stats.null_count.min(&new_stats.null_count);
+                column_stats.max_value = match column_stats.max_value {
+                    Precision::Absent => new_stats.max_value,
+                    _ => column_stats.max_value.min(&new_stats.max_value),
+                };
+                column_stats.min_value = match column_stats.min_value {
+                    Precision::Absent => new_stats.min_value,
+                    _ => column_stats.min_value.max(&new_stats.min_value),
+                };
             }
 
             input_stats

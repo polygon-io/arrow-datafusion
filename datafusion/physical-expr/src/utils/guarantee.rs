@@ -224,6 +224,10 @@ impl LiteralGuarantee {
     }
 
     pub fn statistics(&self) -> ColumnStatistics {
+        if self.guarantee == Guarantee::NotIn {
+            return ColumnStatistics::new_unknown();
+        }
+
         let null_count =
             Precision::Exact(self.literals.iter().filter(|lit| lit.is_null()).count());
 
