@@ -20,7 +20,8 @@
 
 use crate::utils::split_disjunction;
 use crate::{split_conjunction, PhysicalExpr};
-use datafusion_common::{Column, ScalarValue};
+use datafusion_common::stats::Precision;
+use datafusion_common::{Column, ColumnStatistics, ScalarValue};
 use datafusion_expr::Operator;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{self, Display, Formatter};
@@ -220,6 +221,36 @@ impl LiteralGuarantee {
                 }
             })
             .build()
+    }
+
+    pub fn statistics(&self) -> ColumnStatistics {
+        let null_count =
+            Precision::Exact(self.literals.iter().filter(|lit| lit.is_null()).count());
+
+        let max_value = self
+            .literals
+            .iter()
+            .cloned()
+            .map(Precision::Exact)
+            .reduce(|a, b| a.max(&b))
+            .unwrap_or(Precision::Exact(ScalarValue::Null));
+
+        let min_value = self
+            .literals
+            .iter()
+            .cloned()
+            .map(Precision::Exact)
+            .reduce(|a, b| a.min(&b))
+            .unwrap_or(Precision::Exact(ScalarValue::Null));
+
+        let distinct_count = Precision::Exact(self.literals.len());
+
+        ColumnStatistics {
+            null_count,
+            max_value,
+            min_value,
+            distinct_count,
+        }
     }
 }
 

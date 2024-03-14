@@ -42,7 +42,7 @@ use datafusion_execution::TaskContext;
 use datafusion_expr::Operator;
 use datafusion_physical_expr::expressions::BinaryExpr;
 use datafusion_physical_expr::intervals::utils::check_support;
-use datafusion_physical_expr::utils::collect_columns;
+use datafusion_physical_expr::utils::{collect_columns, LiteralGuarantee};
 use datafusion_physical_expr::{
     analyze, split_conjunction, AnalysisContext, ExprBoundaries, PhysicalExpr,
 };
@@ -122,15 +122,32 @@ impl FilterExec {
         predicate: &Arc<dyn PhysicalExpr>,
         default_selectivity: u8,
     ) -> Result<Statistics> {
-        let input_stats = input.statistics()?;
         let schema = input.schema();
+
+        let input_stats = input.statistics().map(|mut input_stats| {
+            for guarantee in LiteralGuarantee::analyze(predicate) {
+                let idx = match schema.index_of(&guarantee.column.name) {
+                    Ok(idx) => idx,
+                    Err(_) => continue,
+                };
+
+                input_stats.column_statistics[idx] = guarantee.statistics();
+            }
+
+            input_stats
+        })?;
+
         if !check_support(predicate, &schema) {
             let selectivity = default_selectivity as f64 / 100.0;
-            let mut stats = input_stats.into_inexact();
-            stats.num_rows = stats.num_rows.with_estimated_selectivity(selectivity);
+            let mut stats = input_stats;
+            stats.num_rows = stats
+                .num_rows
+                .with_estimated_selectivity(selectivity)
+                .to_inexact();
             stats.total_byte_size = stats
                 .total_byte_size
-                .with_estimated_selectivity(selectivity);
+                .with_estimated_selectivity(selectivity)
+                .to_inexact();
             return Ok(stats);
         }
 
