@@ -124,10 +124,9 @@ pub(crate) mod test_util {
     use object_store::local::LocalFileSystem;
     use object_store::path::Path;
     use object_store::{
-        GetOptions, GetResult, GetResultPayload, ListResult, MultipartId, PutOptions,
-        PutResult,
+        Attributes, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload,
+        PutMultipartOpts, PutOptions, PutPayload, PutResult,
     };
-    use tokio::io::AsyncWrite;
 
     pub async fn scan_format(
         state: &SessionState,
@@ -192,7 +191,7 @@ pub(crate) mod test_util {
         async fn put_opts(
             &self,
             _location: &Path,
-            _bytes: Bytes,
+            _bytes: PutPayload,
             _opts: PutOptions,
         ) -> object_store::Result<PutResult> {
             unimplemented!()
@@ -201,16 +200,15 @@ pub(crate) mod test_util {
         async fn put_multipart(
             &self,
             _location: &Path,
-        ) -> object_store::Result<(MultipartId, Box<dyn AsyncWrite + Unpin + Send>)>
-        {
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
             unimplemented!()
         }
 
-        async fn abort_multipart(
+        async fn put_multipart_opts(
             &self,
             _location: &Path,
-            _multipart_id: &MultipartId,
-        ) -> object_store::Result<()> {
+            _opts: PutMultipartOpts,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
             unimplemented!()
         }
 
@@ -236,6 +234,7 @@ pub(crate) mod test_util {
                     version: None,
                 },
                 range: Default::default(),
+                attributes: Attributes::default(),
             })
         }
 
