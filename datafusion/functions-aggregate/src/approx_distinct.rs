@@ -41,8 +41,8 @@ use datafusion_common::{
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::utils::format_state_name;
 use datafusion_expr::{
-    Accumulator, AggregateUDFImpl, Documentation, EmitTo, GroupsAccumulator, Signature,
-    Volatility,
+    Accumulator, AggregateUDFImpl, Documentation, EmitTo, GroupSelection,
+    GroupsAccumulator, Signature, Volatility,
 };
 use datafusion_functions_aggregate_common::aggregate::count_distinct::{
     Bitmap65536DistinctCountAccumulator, Bitmap65536DistinctCountAccumulatorI16,
@@ -568,6 +568,18 @@ impl GroupsAccumulator for HllGroupsAccumulator {
         Ok(Arc::new(counts))
     }
 
+    fn evaluate_preserving(&mut self, selection: GroupSelection<'_>) -> Result<ArrayRef> {
+        selection.validate_num_groups(self.groups.len())?;
+        let counts = UInt64Array::from_iter_values(
+            selection.iter().map(|index| self.groups[index].count()),
+        );
+        Ok(Arc::new(counts))
+    }
+
+    fn supports_evaluate_preserving(&self) -> bool {
+        true
+    }
+
     fn state(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
         let mut groups = emit_to.take_needed(&mut self.groups);
         let mut builder = BinaryBuilder::new();
@@ -581,6 +593,24 @@ impl GroupsAccumulator for HllGroupsAccumulator {
         // The emitted groups have been removed; reclaim their tracked bytes.
         self.allocated_bytes = self.allocated_bytes.saturating_sub(freed);
         Ok(vec![Arc::new(builder.finish())])
+    }
+
+    fn state_preserving(
+        &mut self,
+        selection: GroupSelection<'_>,
+    ) -> Result<Vec<ArrayRef>> {
+        selection.validate_num_groups(self.groups.len())?;
+        let mut builder = BinaryBuilder::new();
+        let mut scratch = Vec::new();
+        for index in selection.iter() {
+            self.groups[index].serialize(&mut scratch);
+            builder.append_value(&scratch);
+        }
+        Ok(vec![Arc::new(builder.finish())])
+    }
+
+    fn supports_state_preserving(&self) -> bool {
+        true
     }
 
     fn convert_to_state(
@@ -1127,6 +1157,51 @@ mod tests {
             // reference: hash 1 and 5 into a dense sketch
             let expected = reference_count(&[h(1), h(5)]);
             assert_eq!(counts.value(0), expected);
+        }
+
+        #[test]
+        fn groups_preserving_reads_keep_hll_state() {
+            let values: ArrayRef = Arc::new(Int64Array::from(vec![1, 2, 2, 3, 10, 10]));
+            let group_indices = vec![0usize, 0, 0, 1, 2, 2];
+            let mut acc = HllGroupsAccumulator::new();
+            acc.update_batch(&[values], &group_indices, None, 4)
+                .unwrap();
+
+            let selection = GroupSelection::try_from_indices(&[2, 0, 2, 3], 4).unwrap();
+            let expected = UInt64Array::from(vec![1, 2, 1, 0]);
+            for _ in 0..2 {
+                let actual = acc.evaluate_preserving(selection).unwrap();
+                assert_eq!(actual.as_primitive::<UInt64Type>(), &expected);
+            }
+
+            let state = acc.state_preserving(selection).unwrap();
+            let mut merged = HllGroupsAccumulator::new();
+            merged.merge_batch(&state, &[0, 1, 2, 3], 4).unwrap();
+            assert_eq!(
+                merged
+                    .evaluate(EmitTo::All)
+                    .unwrap()
+                    .as_primitive::<UInt64Type>(),
+                &expected
+            );
+
+            let empty = GroupSelection::try_from_indices(&[], 4).unwrap();
+            assert!(acc.evaluate_preserving(empty).unwrap().is_empty());
+            let empty_state = acc.state_preserving(empty).unwrap();
+            assert_eq!(empty_state.len(), 1);
+            assert_eq!(empty_state[0].data_type(), &DataType::Binary);
+            assert!(empty_state[0].is_empty());
+
+            let values: ArrayRef = Arc::new(Int64Array::from(vec![4, 20]));
+            acc.update_batch(&[values], &[1, 3], None, 4).unwrap();
+            assert_eq!(
+                acc.evaluate_preserving(GroupSelection::all(4))
+                    .unwrap()
+                    .as_primitive::<UInt64Type>(),
+                &UInt64Array::from(vec![2, 2, 1, 1])
+            );
+            assert!(acc.supports_evaluate_preserving());
+            assert!(acc.supports_state_preserving());
         }
 
         #[test]
