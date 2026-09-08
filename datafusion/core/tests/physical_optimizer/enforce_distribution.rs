@@ -636,7 +636,12 @@ fn ensure_distribution_helper(
     config.optimizer.repartition_file_scans = false;
     config.optimizer.repartition_file_min_size = 1024;
     config.optimizer.prefer_existing_sort = prefer_existing_sort;
-    ensure_distribution(distribution_context, &config).map(|item| item.data.plan)
+    ensure_distribution(
+        distribution_context,
+        &config,
+        &datafusion_physical_plan::statistics::StatisticsContext::new(),
+    )
+    .map(|item| item.data.plan)
 }
 
 fn test_suite_default_config_options() -> ConfigOptions {
@@ -753,7 +758,11 @@ impl TestConfig {
             // Then run ensure_distribution rule
             DistributionContext::new_default(adjusted)
                 .transform_up(|distribution_context| {
-                    ensure_distribution(distribution_context, &self.config)
+                    ensure_distribution(
+                        distribution_context,
+                        &self.config,
+                        &datafusion_physical_plan::statistics::StatisticsContext::new(),
+                    )
                 })
                 .data()
                 .and_then(check_integrity)?;
