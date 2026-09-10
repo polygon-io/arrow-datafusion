@@ -1699,6 +1699,125 @@ mod tests {
     }
 
     #[test]
+    fn first_groups_preserving_reads_support_utf8_values() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ordering",
+            DataType::Utf8,
+            true,
+        )]));
+        let sort_keys = [PhysicalSortExpr {
+            expr: col("ordering", &schema)?,
+            options: SortOptions::default(),
+        }];
+        let mut acc = FirstLastGroupsAccumulator::try_new(
+            BytesValueState::try_new(DataType::Utf8)?,
+            sort_keys.into(),
+            false,
+            &[DataType::Utf8],
+            true,
+        )?;
+
+        let values: ArrayRef = Arc::new(StringArray::from(vec![
+            "late",
+            "first",
+            "group-one",
+            "group-two",
+        ]));
+        let ordering: ArrayRef = Arc::new(StringArray::from(vec!["z", "a", "m", "b"]));
+        acc.update_batch(&[values, ordering], &[0, 0, 1, 2], None, 4)?;
+
+        let selection = GroupSelection::try_from_indices(&[2, 0, 2, 3], 4)?;
+        let expected_values = StringArray::from(vec![
+            Some("group-two"),
+            Some("first"),
+            Some("group-two"),
+            None,
+        ]);
+        for _ in 0..2 {
+            assert_eq!(
+                acc.evaluate_preserving(selection)?.as_string::<i32>(),
+                &expected_values
+            );
+        }
+
+        let state = acc.state_preserving(selection)?;
+        assert_eq!(state.len(), 3);
+        assert_eq!(state[0].as_string::<i32>(), &expected_values);
+        assert_eq!(
+            state[1].as_string::<i32>(),
+            &StringArray::from(vec![Some("b"), Some("a"), Some("b"), None])
+        );
+        assert_eq!(
+            state[2].as_boolean(),
+            &BooleanArray::from(vec![true, true, true, false])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn first_groups_preserving_reads_support_list_values() -> Result<()> {
+        let value_type =
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true)));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ordering",
+            DataType::Int64,
+            true,
+        )]));
+        let sort_keys = [PhysicalSortExpr {
+            expr: col("ordering", &schema)?,
+            options: SortOptions::default(),
+        }];
+        let mut acc = FirstLastGroupsAccumulator::try_new(
+            GenericValueState::new(value_type),
+            sort_keys.into(),
+            false,
+            &[DataType::Int64],
+            true,
+        )?;
+
+        let values = ListArray::from_iter_primitive::<Int32Type, _, _>([
+            Some(vec![Some(9)]),
+            Some(vec![Some(1), Some(2)]),
+            Some(vec![Some(3)]),
+            Some(vec![Some(4), Some(5)]),
+        ]);
+        let ordering = Int64Array::from(vec![9, 1, 3, 2]);
+        acc.update_batch(
+            &[Arc::new(values), Arc::new(ordering)],
+            &[0, 0, 1, 2],
+            None,
+            4,
+        )?;
+
+        let selection = GroupSelection::try_from_indices(&[2, 0, 2, 3], 4)?;
+        let expected_values = ListArray::from_iter_primitive::<Int32Type, _, _>([
+            Some(vec![Some(4), Some(5)]),
+            Some(vec![Some(1), Some(2)]),
+            Some(vec![Some(4), Some(5)]),
+            None,
+        ]);
+        for _ in 0..2 {
+            assert_eq!(
+                acc.evaluate_preserving(selection)?.as_list::<i32>(),
+                &expected_values
+            );
+        }
+
+        let state = acc.state_preserving(selection)?;
+        assert_eq!(state.len(), 3);
+        assert_eq!(state[0].as_list::<i32>(), &expected_values);
+        assert_eq!(
+            state[1].as_primitive::<Int64Type>(),
+            &Int64Array::from(vec![Some(2), Some(1), Some(2), None])
+        );
+        assert_eq!(
+            state[2].as_boolean(),
+            &BooleanArray::from(vec![true, true, true, false])
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_first_group_acc() -> Result<()> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("a", DataType::Int64, true),

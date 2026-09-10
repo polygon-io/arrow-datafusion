@@ -20,13 +20,29 @@ use std::sync::Arc;
 
 use arrow::array::{
     Array, ArrayRef, ArrowPrimitiveType, AsArray, BinaryBuilder, BinaryViewBuilder,
-    BooleanBufferBuilder, LargeBinaryBuilder, LargeStringBuilder, PrimitiveArray,
-    StringBuilder, StringViewBuilder,
+    BooleanBufferBuilder, LargeBinaryBuilder, LargeStringBuilder, OffsetSizeTrait,
+    PrimitiveArray, StringBuilder, StringViewBuilder,
 };
 use arrow::buffer::{BooleanBuffer, NullBuffer};
 use arrow::datatypes::DataType;
 use datafusion_common::{Result, ScalarValue, exec_datafusion_err, internal_err};
 use datafusion_expr::{EmitTo, GroupSelection};
+
+fn checked_selected_value_length(current: usize, additional: usize) -> Result<usize> {
+    current
+        .checked_add(additional)
+        .ok_or_else(|| exec_datafusion_err!("First/last selected value length overflow"))
+}
+
+fn validate_selected_value_offset<O: OffsetSizeTrait>(total_len: usize) -> Result<()> {
+    if total_len > O::MAX_OFFSET {
+        let offset_type = if O::IS_LARGE { "i64" } else { "i32" };
+        return Err(exec_datafusion_err!(
+            "First/last selected value data exceeds {offset_type} offset capacity"
+        ));
+    }
+    Ok(())
+}
 
 pub(crate) trait ValueState: Send + Sync {
     /// Returns the number of stored groups.
@@ -312,24 +328,14 @@ impl ValueState for BytesValueState {
         selection.validate_num_groups(self.vals.len())?;
         let total_len = selection.iter().try_fold(0usize, |total, index| {
             let len = self.vals[index].as_ref().map_or(0, Vec::len);
-            total.checked_add(len).ok_or_else(|| {
-                exec_datafusion_err!("First/last selected value length overflow")
-            })
+            checked_selected_value_length(total, len)
         })?;
         match self.data_type {
             DataType::Utf8 | DataType::Binary => {
-                i32::try_from(total_len).map_err(|_| {
-                    exec_datafusion_err!(
-                        "First/last selected value data exceeds i32 offset capacity"
-                    )
-                })?;
+                validate_selected_value_offset::<i32>(total_len)?;
             }
             DataType::LargeUtf8 | DataType::LargeBinary => {
-                i64::try_from(total_len).map_err(|_| {
-                    exec_datafusion_err!(
-                        "First/last selected value data exceeds i64 offset capacity"
-                    )
-                })?;
+                validate_selected_value_offset::<i64>(total_len)?;
             }
             _ => {}
         }
@@ -546,6 +552,37 @@ mod tests {
     };
     use arrow::buffer::{OffsetBuffer, ScalarBuffer};
     use arrow::datatypes::{DataType, Field, Fields};
+
+    #[test]
+    fn selected_value_length_checks_offset_capacity() {
+        assert_eq!(
+            checked_selected_value_length(usize::MAX, 0).unwrap(),
+            usize::MAX
+        );
+        assert!(
+            checked_selected_value_length(usize::MAX, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("length overflow")
+        );
+
+        assert!(validate_selected_value_offset::<i32>(i32::MAX as usize).is_ok());
+        assert!(
+            validate_selected_value_offset::<i32>(i32::MAX as usize + 1)
+                .unwrap_err()
+                .to_string()
+                .contains("i32 offset capacity")
+        );
+        assert!(validate_selected_value_offset::<i64>(i64::MAX as usize).is_ok());
+        if let Some(too_large) = (i64::MAX as usize).checked_add(1) {
+            assert!(
+                validate_selected_value_offset::<i64>(too_large)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("i64 offset capacity")
+            );
+        }
+    }
 
     #[test]
     fn test_bytes_value_state_utf8() -> Result<()> {

@@ -35,8 +35,8 @@ use arrow::datatypes::{
 use datafusion_common::ScalarValue;
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::{
-    DataFusionError, Result, downcast_value, internal_datafusion_err, internal_err,
-    not_impl_err,
+    DataFusionError, Result, downcast_value, exec_datafusion_err,
+    internal_datafusion_err, internal_err, not_impl_err,
 };
 use datafusion_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion_expr::utils::format_state_name;
@@ -435,6 +435,16 @@ impl GroupHll {
     }
 }
 
+fn checked_hll_state_data_length(current: usize, additional: usize) -> Result<usize> {
+    let total = current
+        .checked_add(additional)
+        .ok_or_else(|| exec_datafusion_err!("Approx distinct state length overflow"))?;
+    i32::try_from(total).map_err(|_| {
+        exec_datafusion_err!("Approx distinct state exceeds i32 offset capacity")
+    })?;
+    Ok(total)
+}
+
 /// A [`GroupsAccumulator`] for `approx_distinct` that keeps one adaptive
 /// (sparse → dense) HyperLogLog sketch per group.
 ///
@@ -602,8 +612,10 @@ impl GroupsAccumulator for HllGroupsAccumulator {
         selection.validate_num_groups(self.groups.len())?;
         let mut builder = BinaryBuilder::new();
         let mut scratch = Vec::new();
+        let mut total_bytes = 0;
         for index in selection.iter() {
             self.groups[index].serialize(&mut scratch);
+            total_bytes = checked_hll_state_data_length(total_bytes, scratch.len())?;
             builder.append_value(&scratch);
         }
         Ok(vec![Arc::new(builder.finish())])
@@ -1372,6 +1384,26 @@ mod tests {
         let mut buf = Vec::new();
         g.serialize(&mut buf);
         buf
+    }
+
+    #[test]
+    fn hll_state_data_length_checks_offset_capacity() {
+        assert_eq!(
+            checked_hll_state_data_length(i32::MAX as usize, 0).unwrap(),
+            i32::MAX as usize
+        );
+        assert!(
+            checked_hll_state_data_length(i32::MAX as usize, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("i32 offset capacity")
+        );
+        assert!(
+            checked_hll_state_data_length(usize::MAX, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("length overflow")
+        );
     }
 
     #[test]
