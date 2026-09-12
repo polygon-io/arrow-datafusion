@@ -153,6 +153,7 @@ use datafusion_common::Result;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
 use datafusion_physical_plan::ExecutionPlan;
+use datafusion_physical_plan::statistics::StatisticsContext;
 
 /// Optimizer rule that enforces both distribution and sorting requirements.
 ///
@@ -199,8 +200,26 @@ impl PhysicalOptimizerRule for EnsureRequirements {
 
         // Step 2a: Distribution enforcement (bottom-up)
         let dist_ctx = DistributionContext::new_default(plan);
+        // Share one statistics memoization cache across the whole distribution
+        // pass so each subtree's statistics are computed once instead of once
+        // per ancestor. `StatsCache` is keyed by raw node pointer, so reset it
+        // after any node that changed the plan: a rewrite can free a cached node
+        // and a later allocation could reuse its address.
+        let stats_ctx = StatisticsContext::new();
         let dist_ctx = dist_ctx
-            .transform_up(|ctx| ensure_distribution(ctx, config))
+            .transform_up(|ctx| {
+                // `ensure_distribution` always reports `Transformed::yes`, so key
+                // the cache reset on whether the node's plan pointer actually
+                // changed. A changed node may have freed a cached child, which
+                // would make a stale pointer key unsafe; an unchanged node cannot,
+                // so the memoization safely persists across no-op nodes.
+                let before = Arc::clone(&ctx.plan);
+                let result = ensure_distribution(ctx, config, &stats_ctx)?;
+                if !Arc::ptr_eq(&before, &result.data.plan) {
+                    stats_ctx.reset_cache();
+                }
+                Ok(result)
+            })
             .data()?;
 
         // Step 2b: Sorting enforcement (bottom-up) — runs on distribution-fixed plan
